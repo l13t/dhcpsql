@@ -1,0 +1,122 @@
+DHCPsql
+-------
+
+The light in evil days have come. Storing your static leases in a decent SQL
+database is a lucid dream from many SysOps. This initial version supports an
+online and active database. Please don't forget this implies angry customers
+when your MySQL database is dead.
+
+To enable this yet, very _UNTESTED_ software. Go to the Makefile and uncomment
+DHCPsql. You should setup a database in MySQL. By default we use:
+
+dbserver           127.0.0.1
+user               dhcp
+password           dhcp
+database           dhcp
+table_options      options
+table_staticleases staticleases
+table_efficient    yes
+
+These same options can be set in the udhcpd.conf. Create a table that is able
+to store staticleases:
+
+CREATE TABLE `options` (
+  `id` int(11) NOT NULL auto_increment,
+  `class` int(11) NOT NULL,
+  `code` tinyint(5) NOT NULL,
+  `data` varchar(255) NOT NULL,
+  PRIMARY KEY  (`id`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8;
+
+
+CREATE TABLE `staticleases` (
+  `mac` bigint(6) NOT NULL,
+  `ip` bigint(11) default NULL,
+  `class` int(11) default NULL,
+  PRIMARY KEY  (`mac`),
+  UNIQUE KEY `ip` (`ip`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8;
+
+To explain this design choice. It is a waste of space to store a text version
+of a mac adress or an ip adress. As you learned in school every hex address
+can just be added to make up a bigger number.
+So... YO:UR:MA:CA:DD:YY would be 0xYOURMACADDYY. Decimal ipaddress by hand:
+
+192 * 256^3 + 168 * 256^2 + 0 * 256^1 + 1 * 256^0 = ip
+or... inet_aton('192.168.0.1') in your favorite MySQL server.
+
+
+If SQL_EFFICIENT_FIELDS is not defined, you can use:
+
+CREATE TABLE `staticleases_readable` (
+  `mac` char(12) NOT NULL,
+  `ip` varchar(15) default NULL,
+  `class` int(11) default NULL,
+  PRIMARY KEY  (`mac`),
+  UNIQUE KEY `ip` (`ip`)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8;
+
+This allows plain strings such als YOURMACADDY and 192.168.0.1 as string in
+the table.
+
+
+Then WHY do you have to make it so easy for me in the second table. Hey :)
+good question. Basically because SQL doesn't allow me to do active limiting
+on the data field, by the code field. So you can just do:
+
+Subnet:
+code: 0x01
+data: '255.255.255.0'
+
+Could we make it more easy for you? Sure... 
+http://www.faqs.org/rfcs/rfc2132.html 
+
+Could we make it even more easy for you? Sure...
+
+** Check out the dhcp.sql **
+
+
+The bigger picture should eventually be to get 'maskable' DHCP packages.
+Using mask you could set up a simple provisioning system for Cable/DSL 
+subscribers.
+
+A default configuration options have been added, in the options table,
+class = 0 will basically be appended to any configuration. If class = 0
+is not defined, it will not be added. Overiding is currently _not_ possible.
+
+
+Version 0.1 'A new begin'
+-------------------------
+
+- Supports static leases from MySQL
+
+
+Version 0.1.1 'for us'
+______________________
+
+- Support single options in MySQL
+
+
+Version 0.2-pre6 'From Wodkaland with Love'
+-------------------------------------------
+
+- Support for OPTION_LIST with OPTION_IP
+
+
+TODO:
+-----
+
+I have put some untested code in the option handling. If you could test
+the memcpy's for this material. And report back if it _really_ works...
+
+SQL code abstraction, I want to put the MySQL code in some wrapper. To
+allow to 'wait' until a connection comes back up. (And reduce the
+amount of connects).
+
+If Option 82/83 are requested I'll add them.
+
+
+
+Have fun :)
+
+Stefan de Konink <stefan@konink.de>
