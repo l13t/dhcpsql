@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  dhcpsql-build:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dhcpsql-builder
+    volumes:
+      - ..:/app
+      - ./output:/app/docker/output
+    working_dir: /app
+    command: >
+      bash -c "
+        echo 'Building DHCP SQL Server with Makefile...' &&
+        make clean &&
+        make all &&
+        echo 'Build completed. Copying binaries to output directory...' &&
+        mkdir -p /app/docker/output &&
+        cp -v udhcpd /app/docker/output/ 2>/dev/null || echo 'udhcpd not found' &&
+        cp -v udhcpc /app/docker/output/ 2>/dev/null || echo 'udhcpc not found' &&
+        cp -v dumpleases /app/docker/output/ 2>/dev/null || echo 'dumpleases not found' &&
+        ls -la /app/docker/output/ &&
+        echo 'Build process finished.'
+      "
+
+  dhcpsql-cmake:
+    build: .
+    container_name: dhcpsql-cmake-builder
+    volumes:
+      - .:/app
+      - ./build-output:/app/output
+    working_dir: /app
+    command: >
+      bash -c "
+        echo 'Building DHCP SQL Server with CMake...' &&
+        mkdir -p build &&
+        cd build &&
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_MYSQL=ON -DCOMBINED_BINARY=ON &&
+        make -j\$(nproc) &&
+        echo 'CMake build completed. Copying binaries to output directory...' &&
+        mkdir -p /app/output &&
+        cp -v udhcpd /app/output/ 2>/dev/null || echo 'udhcpd not found' &&
+        cp -v udhcpc /app/output/ 2>/dev/null || echo 'udhcpc not found' &&
+        cp -v dumpleases /app/output/ 2>/dev/null || echo 'dumpleases not found' &&
+        ls -la /app/output/ &&
+        echo 'CMake build process finished.'
+      "
+
+  dhcpsql-dev:
+    build: .
+    container_name: dhcpsql-dev
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: bash
+    stdin_open: true
+    tty: true

@@ -1,0 +1,123 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: dhcp-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: dhcp  
+      MYSQL_USER: dhcp
+      MYSQL_PASSWORD: dhcp
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./config/dhcp.sql:/docker-entrypoint-initdb.d/01-dhcp-schema.sql:ro
+      - ./config/sample-data.sql:/docker-entrypoint-initdb.d/02-sample-data.sql:ro
+    networks:
+      - dhcp-network
+    # healthcheck:
+    #   test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "dhcp", "-pdhcp"]
+    #   timeout: 20s
+    #   retries: 10
+    #   interval: 10s
+    #   start_period: 30s
+
+  # Standard network mode DHCP server (for testing/development)
+  udhcpd-bridge:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: dhcp-server-bridge
+    restart: unless-stopped
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
+    volumes:
+      - ./config/udhcpd-docker.conf:/etc/udhcpd.conf:ro
+      - ./config:/app/config:ro
+      - dhcp_leases:/var/lib/dhcp
+      - ./logs:/var/log/dhcp
+    networks:
+      - dhcp-network
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_USER=dhcp
+      - MYSQL_PASSWORD=dhcp
+      - MYSQL_DATABASE=dhcp
+    command: ["/app/udhcpd", "/etc/udhcpd.conf"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    profiles:
+      - bridge
+
+  # Host network mode DHCP server (for production)
+  udhcpd-host:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: dhcp-server-host
+    restart: unless-stopped
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
+    volumes:
+      - ./config/udhcpd-host.conf:/etc/udhcpd.conf:ro
+      - ./config:/app/config:ro
+      - dhcp_leases:/var/lib/dhcp
+      - ./logs:/var/log/dhcp
+    network_mode: host
+    environment:
+      - MYSQL_HOST=127.0.0.1
+      - MYSQL_USER=dhcp
+      - MYSQL_PASSWORD=dhcp
+      - MYSQL_DATABASE=dhcp
+    command: ["/app/udhcpd", "/etc/udhcpd.conf"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    profiles:
+      - host
+
+  # PHPMyAdmin for database management
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: dhcp-phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: dhcp
+      PMA_PASSWORD: dhcp
+    ports:
+      - "8080:80"
+    networks:
+      - dhcp-network
+
+  # MySQL CLI tool for debugging
+  mysql-client:
+    image: mysql:8.0
+    container_name: dhcp-mysql-client
+    # depends_on:
+    #   mysql:
+    #     condition: service_healthy
+    networks:
+      - dhcp-network
+    volumes:
+      - ./config:/scripts:ro
+    command: tail -f /dev/null
+    profiles:
+      - tools
+
+volumes:
+  mysql_data:
+    driver: local
+  dhcp_leases:
+    driver: local
+
+networks:
+  dhcp-network:
+    driver: bridge

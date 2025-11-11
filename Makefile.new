@@ -87,13 +87,8 @@ EXEC3 = dumpleases
 OBJS3 = $(UTILSDIR)/dumpleases.o
 
 # Build targets
-ifdef COMBINED_BINARY
-all: $(EXEC1) $(EXEC3)
-	$(STRIP) --remove-section=.note --remove-section=.comment $(EXEC1) $(EXEC3) 2>/dev/null || true
-else
 all: $(EXEC1) $(EXEC2) $(EXEC3)
 	$(STRIP) --remove-section=.note --remove-section=.comment $(EXEC1) $(EXEC2) $(EXEC3) 2>/dev/null || true
-endif
 
 $(OBJS1) $(OBJS2) $(OBJS3): $(INCDIR)/udhcp/*.h Makefile
 $(EXEC1) $(EXEC2) $(EXEC3): Makefile
@@ -135,11 +130,7 @@ endif
 
 # Clean targets
 clean:
-ifdef COMBINED_BINARY
-	-rm -f $(EXEC1) $(EXEC3)
-else
-	-rm -f $(EXEC1) $(EXEC2) $(EXEC3)
-endif
+	-rm -f $(EXEC1) $(EXEC2) $(EXEC3) 
 	-rm -f $(COMMON_OBJS) $(SERVER_OBJS) $(CLIENT_OBJS) $(UTILS_OBJS) $(UTILSDIR)/frontend.o
 	-rm -f core
 
