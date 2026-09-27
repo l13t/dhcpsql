@@ -2,17 +2,20 @@ name: Build and release
 
 on:
   push:
-    branches: ['**']
+    branches: [master]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   pull_request:
+    branches: [master]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Serialize each branch through publication so two merges cannot choose the same tag.
+# PR runs: a new push cancels the stale run. master: serialize so two merges cannot choose the same tag.
 concurrency:
   group: build-release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   version:
