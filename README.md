@@ -1,6 +1,6 @@
 # DHCP SQL Server - Fully Refactored & Modernized
 
-![Build Status](https://img.shields.io/badge/build-refactored-success)
+[![Build and release](https://github.com/l13t/dhcpsql/actions/workflows/build.yml/badge.svg)](https://github.com/l13t/dhcpsql/actions/workflows/build.yml)
 ![Structure](https://img.shields.io/badge/structure-modern-brightgreen)
 ![Organization](https://img.shields.io/badge/organization-complete-blue)
 
@@ -74,6 +74,39 @@ sudo ./scripts/deploy.sh
 ```
 
 ---
+
+## GitHub Actions and releases
+
+The [Build and release workflow](https://github.com/l13t/dhcpsql/actions/workflows/build.yml)
+runs on branch pushes, pull requests, and manual dispatches. It builds and tests
+all four combinations of MySQL enabled/disabled and combined/separate binaries
+on Ubuntu 24.04. The MySQL-enabled combined build is also saved as a workflow artifact.
+
+To publish a release, update the version in `CMakeLists.txt` and
+`include/udhcp/version.h`, commit the changes together with the workflow, then
+push a tag matching `vMAJOR.MINOR.PATCH`:
+
+```sh
+git tag v0.9.10
+git push origin v0.9.10
+```
+
+After all four builds and their tests pass, the workflow creates a GitHub Release
+with generated notes, `dhcpsql-linux-x86_64.tar.gz`, and `SHA256SUMS`. It uses the
+built-in `GITHUB_TOKEN`; no extra repository secrets are required. Release tags
+are immutable in this workflow: rerunning publication does not overwrite an
+existing release.
+
+The archive contains `sbin/udhcpd`, the `sbin/udhcpc` symlink, `bin/dumpleases`,
+sample configuration, manual pages, and build provenance. Binaries are dynamically
+linked and target Ubuntu 24.04 x86_64, with runtime packages `libc6` and
+`libmysqlclient21`; they are not portable static binaries. After downloading both
+assets, verify and extract them with:
+
+```sh
+sha256sum --check SHA256SUMS
+tar -xzf dhcpsql-linux-x86_64.tar.gz
+```
 
 ## 🔧 **Refactoring Improvements**
 
