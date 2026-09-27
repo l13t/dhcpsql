@@ -1,0 +1,120 @@
+name: Build and release
+
+on:
+  push:
+    branches: [master]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# PR runs: a new push cancels the stale run. master: serialize so two merges cannot choose the same tag.
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version:
+    name: Determine release version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test release versioning
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Analyze Conventional Commits
+        id: release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: python3 scripts/release.py
+
+  build:
+    needs: version
+    name: MySQL ${{ matrix.mysql }}, combined ${{ matrix.combined }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ['ON', 'OFF']
+        combined: ['ON', 'OFF']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set release version
+        if: needs.version.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: python3 scripts/release.py --set-version "$RELEASE_VERSION"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libmysqlclient-dev valgrind
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTS=ON
+          -DENABLE_DEBUG=OFF
+          -DENABLE_MYSQL=${{ matrix.mysql }}
+          -DCOMBINED_BINARY=${{ matrix.combined }}
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 60
+      - name: Package
+        if: matrix.mysql == 'ON' && matrix.combined == 'ON'
+        env:
+          BUILD_REF: ${{ needs.version.outputs.version != '' && format('v{0}', needs.version.outputs.version) || github.ref_name }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          package=dhcpsql-linux-x86_64
+          cmake --install build --prefix "$PWD/stage/$package"
+          cp README.md "stage/$package/"
+          printf 'Ref: %s\nCommit: %s\nPlatform: Ubuntu 24.04 x86_64\nRuntime: libc6, libmysqlclient21\n' \
+            "$BUILD_REF" "$BUILD_SHA" > "stage/$package/BUILD-INFO.txt"
+          mkdir -p dist
+          tar -czf "dist/$package.tar.gz" -C stage "$package"
+          cd dist
+          sha256sum "$package.tar.gz" > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: matrix.mysql == 'ON' && matrix.combined == 'ON'
+        with:
+          name: dhcpsql-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.version.outputs.version != ''
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dhcpsql-linux-x86_64
+          path: dist
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ needs.version.outputs.version }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: >-
+          gh release create "$TAG"
+          dist/dhcpsql-linux-x86_64.tar.gz dist/SHA256SUMS
+          --target "$RELEASE_SHA" --generate-notes --title "dhcpsql $TAG"
