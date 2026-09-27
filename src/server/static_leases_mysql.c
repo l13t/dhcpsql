@@ -18,195 +18,119 @@
 #include "udhcp/static_leases.h"
 #include "udhcp/dhcpd.h"
 
-/* Takes the address of the pointer to the static_leases table,
- *   Address to a 6 byte mac address
- *   Address to a 4 byte ip address */
+/* Connections are short-lived; bound waits so database outages do not hang DHCP. */
+static MYSQL *connect_database(void)
+{
+	MYSQL *conn = mysql_init(NULL);
+	unsigned int timeout = 2;
+	if (!conn) return NULL;
+	mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+	mysql_options(conn, MYSQL_OPT_READ_TIMEOUT, &timeout);
+	mysql_options(conn, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
+	if (!mysql_real_connect(conn, server_config.dbserver, server_config.user,
+		server_config.password, server_config.database, 0, NULL, 0)) {
+		fprintf(stderr, "%s\n", mysql_error(conn));
+		mysql_close(conn);
+		return NULL;
+	}
+	return conn;
+}
+
 int addStaticLease(struct static_lease **lease_struct, uint8_t *mac, uint32_t *ip)
 {
-
-	char query[256];
-	MYSQL *conn;
-
-	(void) lease_struct;
-
-	conn = mysql_init(NULL);
-
-	/* Connect to database */
-	if (!mysql_real_connect(conn, server_config.dbserver, server_config.user, server_config.password, server_config.database, 0, NULL, 0)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-		exit(0);
-	}
-
+	char query[512];
+	MYSQL *conn = connect_database();
+	int result, len;
+	(void)lease_struct;
+	if (!conn) return 0;
 	if (server_config.table_efficient)
-		snprintf(query, 256, "INSERT INTO %s (mac, ip) VALUES (0x%02x%02x%02x%02x%02x%02x, %u)", server_config.table_staticleases, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], *ip);
+		len = snprintf(query, sizeof(query), "INSERT INTO %s (mac, ip) VALUES (0x%02x%02x%02x%02x%02x%02x, %u)", server_config.table_staticleases, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ntohl(*ip));
 	else
-		snprintf(query, 256, "INSERT INTO %s (mac, ip) VALUES (\"%02x%02x%02x%02x%02x%02x\", INET_NTOA(%u))", server_config.table_staticleases, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], *ip);
-#ifdef UDHCP_DEBUG
-	printf("%s\n", query);
-#endif
-	/* send SQL quer */
-	if (mysql_query(conn, query)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-		return 0;
-	}
-	
+		len = snprintf(query, sizeof(query), "INSERT INTO %s (mac, ip) VALUES ('%02x%02x%02x%02x%02x%02x', INET_NTOA(%u))", server_config.table_staticleases, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ntohl(*ip));
+	result = len >= 0 && (size_t)len < sizeof(query) && mysql_query(conn, query) == 0;
+	if (!result) fprintf(stderr, "Static lease insert failed: %s\n", mysql_error(conn));
 	mysql_close(conn);
-	
-	return 1;
-
+	return result;
 }
 
-/* Check to see if a mac has an associated static lease */
 uint32_t getIpByMac(struct static_lease *lease_struct, void *arg)
 {
-	uint32_t return_ip;
 	uint8_t *mac = arg;
-
-	(void) lease_struct;
-
-	return_ip = 0;
-
-	char query[256];
-	
-	MYSQL *conn;
+	uint32_t ip = STATIC_LEASE_ERROR;
+	char query[512];
+	int len;
+	MYSQL *conn = connect_database();
 	MYSQL_RES *res;
 	MYSQL_ROW row;
-
-	conn = mysql_init(NULL);
-
-	/* Connect to database */
-	if (!mysql_real_connect(conn, server_config.dbserver, server_config.user, server_config.password, server_config.database, 0, NULL, 0)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-		exit(0);
-	}
-
+	(void)lease_struct;
+	if (!conn) return STATIC_LEASE_ERROR;
 	if (server_config.table_efficient)
-		snprintf(query, 256, "SELECT ip FROM %s WHERE mac = 0x%02x%02x%02x%02x%02x%02x", server_config.table_staticleases, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+		len = snprintf(query, sizeof(query), "SELECT INET_NTOA(ip) FROM %s WHERE mac = 0x%02x%02x%02x%02x%02x%02x", server_config.table_staticleases, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 	else
-		snprintf(query, 256, "SELECT INET_ATON(ip) FROM %s WHERE LOWER(mac) = \"%02x%02x%02x%02x%02x%02x\"", server_config.table_staticleases, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
-#ifdef UDHCP_DEBUG
-	printf("%s\n", query);
-#endif
-
-	/* send SQL query */
-	if (mysql_query(conn, query)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-		return_ip = 0;
+		len = snprintf(query, sizeof(query), "SELECT ip FROM %s WHERE LOWER(mac) = '%02x%02x%02x%02x%02x%02x'", server_config.table_staticleases, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	if (len < 0 || (size_t)len >= sizeof(query) || mysql_query(conn, query)) goto out;
+	res = mysql_store_result(conn);
+	if (!res) goto out;
+	row = mysql_fetch_row(res);
+	if (!row) {
+		if (!mysql_errno(conn)) ip = 0;
 	} else {
 		struct in_addr addr;
-		res = mysql_use_result(conn);
-		
-		/* Should be only one row, otherwise take the last I guess ;) */
-		while ((row = mysql_fetch_row(res)) != NULL) {
-			inet_aton(row[0], &addr);
-			memcpy(&return_ip, &addr.s_addr, 4);
-		}
-		
-		/* Release memory used to store results and close connection */
-		mysql_free_result(res);
+		if (row[0] && inet_pton(AF_INET, row[0], &addr) == 1 &&
+		    addr.s_addr != 0 && addr.s_addr != STATIC_LEASE_ERROR)
+			ip = addr.s_addr;
 	}
-
+	mysql_free_result(res);
+out:
+	if (ip == STATIC_LEASE_ERROR) fprintf(stderr, "Static lease lookup failed: %s\n", mysql_error(conn));
 	mysql_close(conn);
-	
-	return return_ip;
-
+	return ip;
 }
 
-/* Check to see if an ip is reserved as a static ip */
+/* A failed reservation check must never make an address available. */
 uint32_t reservedIp(struct static_lease *lease_struct, uint32_t ip)
 {
-	uint32_t return_val = 0;
-	char query[256];
-
-	MYSQL *conn;
+	char query[512];
+	int len;
+	uint32_t reserved = STATIC_LEASE_ERROR;
+	MYSQL *conn = connect_database();
 	MYSQL_RES *res;
-	MYSQL_ROW row;
-
-	(void) lease_struct;
-
-	conn = mysql_init(NULL);
-
-	/* Connect to database */
-	if (!mysql_real_connect(conn, server_config.dbserver, server_config.user, server_config.password, server_config.database, 0, NULL, 0)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-	}
-	
+	(void)lease_struct;
+	if (!conn) return reserved;
 	if (server_config.table_efficient)
-		snprintf(query, 256, "SELECT TRUE FROM %s WHERE ip = %u LIMIT 1", server_config.table_staticleases, ip);
+		len = snprintf(query, sizeof(query), "SELECT 1 FROM %s WHERE ip = %u LIMIT 1", server_config.table_staticleases, ntohl(ip));
 	else
-		snprintf(query, 256, "SELECT TRUE FROM %s WHERE ip = INET_NTOA(%u) LIMIT 1", server_config.table_staticleases, ip);
-#ifdef UDHCP_DEBUG
-	printf("%s\n", query);
-#endif
-	
-
-	/* send SQL query */
-	if (mysql_query(conn, query)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-		return_val = 0;
-	} else {
-		res = mysql_use_result(conn);
-		
-		/* Should be only one row, otherwise take the last I guess ;) */
-		while ((row = mysql_fetch_row(res)) != NULL) {
-			return_val = 1;
-		}
-		
-		/* Release memory used to store results and close connection */
-		mysql_free_result(res);
-	}
-
+		len = snprintf(query, sizeof(query), "SELECT 1 FROM %s WHERE ip = INET_NTOA(%u) LIMIT 1", server_config.table_staticleases, ntohl(ip));
+	if (len < 0 || (size_t)len >= sizeof(query) || mysql_query(conn, query)) goto out;
+	res = mysql_store_result(conn);
+	if (!res) goto out;
+	reserved = mysql_num_rows(res) != 0;
+	mysql_free_result(res);
+out:
 	mysql_close(conn);
-
-	return return_val;
-
+	return reserved;
 }
 
 #ifdef UDHCP_DEBUG
-/* Print out static leases just to check what's going on */
-/* Takes the address of the pointer to the static_leases linked list */
 void printStaticLeases(struct static_lease **arg)
 {
-	char query[256];
-
-	(void) arg;
-	
-	MYSQL *conn;
+	char query[512];
+	MYSQL *conn = connect_database();
 	MYSQL_RES *res;
 	MYSQL_ROW row;
-
-	conn = mysql_init(NULL);
-
-	/* Connect to database */
-	if (!mysql_real_connect(conn, server_config.dbserver, server_config.user, server_config.password, server_config.database, 0, NULL, 0)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-		exit(0);
-	}
-	
-	if (server_config.table_efficient)
-		snprintf(query, 256, "SELECT mac, INET_NTOA(ip) FROM %s", server_config.table_staticleases);
-	else
-		snprintf(query, 256, "SELECT mac, ip FROM %s", server_config.table_staticleases);
-
-	/* send SQL query */
-	if (mysql_query(conn, query)) {
-		fprintf(stderr, "%s\n", mysql_error(conn));
-	} else {
-		res = mysql_use_result(conn);
-		
-		/* Should be only one row, otherwise take the last I guess ;) */
-		while ((row = mysql_fetch_row(res)) != NULL) {
-			printf("PrintStaticLeases: Lease mac Value: %s\n", (char *)row[0]);
-			printf("PrintStaticLeases: Lease ip Value: %s\n", (char *)row[1]);
+	int len;
+	(void)arg;
+	if (!conn) return;
+	len = snprintf(query, sizeof(query), "SELECT mac, %s FROM %s",
+		server_config.table_efficient ? "INET_NTOA(ip)" : "ip", server_config.table_staticleases);
+	if (len >= 0 && (size_t)len < sizeof(query) && !mysql_query(conn, query)) {
+		res = mysql_store_result(conn);
+		if (res) {
+			while ((row = mysql_fetch_row(res)))
+				printf("Static lease: %s %s\n", row[0] ? row[0] : "NULL", row[1] ? row[1] : "NULL");
+			mysql_free_result(res);
 		}
-		
-		/* Release memory used to store results and close connection */
-		mysql_free_result(res);
 	}
-
 	mysql_close(conn);
 }
 #endif
-
-
-

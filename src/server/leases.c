@@ -137,7 +137,9 @@ uint32_t find_address(int check_expired)
 		if ((addr & 0xFF) == 0xFF) continue;
 
 		/* Only do if it isn't an assigned as a static lease */
-		if(!reservedIp(server_config.static_leases, htonl(addr)))
+		uint32_t reserved = reservedIp(server_config.static_leases, htonl(addr));
+		if (reserved == STATIC_LEASE_ERROR) return 0;
+		if (!reserved)
 		{
 
 		/* lease is not taken */

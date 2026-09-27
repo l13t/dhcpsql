@@ -27,6 +27,8 @@
 #include <string.h>
 #include <time.h>
 #include <mysql.h>
+#include <errno.h>
+#include <stdlib.h>
 
 #include "udhcp/serverpacket.h"
 #include "udhcp/dhcpd.h"
@@ -107,11 +109,11 @@ static void add_bootp_options(struct dhcpMessage *packet)
 }
 
 
-static int add_mysql_options(struct dhcpMessage *packet, void *arg)
+static int add_mysql_options(struct dhcpMessage *packet, void *arg, uint32_t *lease_time)
 {
-	int return_value;
+	int return_value, query_length;
 
-	char query[512];
+	char query[1024];
 
 	uint8_t *mac = arg;
 
@@ -122,41 +124,61 @@ static int add_mysql_options(struct dhcpMessage *packet, void *arg)
 	return_value = 0;
 
 	conn = mysql_init(NULL);
+	if (!conn) return -1;
+	unsigned int timeout = 2;
+	mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+	mysql_options(conn, MYSQL_OPT_READ_TIMEOUT, &timeout);
+	mysql_options(conn, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
 
 	/* Connect to database */
 	if (!mysql_real_connect(conn, server_config.dbserver, server_config.user, server_config.password, server_config.database, 0, NULL, 0)) {
 		fprintf(stderr, "%s\n", mysql_error(conn));
-		return 0;
+		mysql_close(conn);
+		return -1;
         }
 	if (server_config.table_efficient)
-		snprintf(query, 512, "SELECT * FROM (SELECT code, data FROM %s, %s WHERE %s.class = %s.class AND mac = 0x%02x%02x%02x%02x%02x%02x UNION SELECT code, data FROM %s WHERE class = 0) AS x ORDER BY code", server_config.table_staticleases, server_config.table_options, server_config.table_staticleases, server_config.table_options, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], server_config.table_options);
+		query_length = snprintf(query, sizeof(query), "SELECT * FROM (SELECT code, data, %s.class AS priority FROM %s, %s WHERE %s.class = %s.class AND mac = 0x%02x%02x%02x%02x%02x%02x UNION SELECT code, data, class AS priority FROM %s WHERE class = 0) AS x ORDER BY code, priority = 0 DESC, priority, data", server_config.table_options, server_config.table_staticleases, server_config.table_options, server_config.table_staticleases, server_config.table_options, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], server_config.table_options);
 	else
-		snprintf(query, 512, "SELECT * FROM (SELECT code, data FROM %s, %s WHERE %s.class = %s.class AND LOWER(mac) = \"%02x%02x%02x%02x%02x%02x\" UNION SELECT code, data FROM %s WHERE class = 0) AS x ORDER BY code", server_config.table_staticleases, server_config.table_options, server_config.table_staticleases, server_config.table_options, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], server_config.table_options);
+		query_length = snprintf(query, sizeof(query), "SELECT * FROM (SELECT code, data, %s.class AS priority FROM %s, %s WHERE %s.class = %s.class AND LOWER(mac) = \"%02x%02x%02x%02x%02x%02x\" UNION SELECT code, data, class AS priority FROM %s WHERE class = 0) AS x ORDER BY code, priority = 0 DESC, priority, data", server_config.table_options, server_config.table_staticleases, server_config.table_options, server_config.table_staticleases, server_config.table_options, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], server_config.table_options);
 #ifdef UDHCP_DEBUG
 	printf("%s\n", query);
 #endif
 
-	/* send SQL query */
+	if (query_length < 0 || (size_t)query_length >= sizeof(query)) {
+		mysql_close(conn);
+		return -1;
+	}
+
+	/* Rows for class zero precede class-specific values. */
 	if (mysql_query(conn, query)) {
 		fprintf(stderr, "%s\n", mysql_error(conn));
-		return_value = 0;
-        } else {
-		res = mysql_use_result(conn);
-
-		while ((row = mysql_fetch_row(res)) != NULL) {
-			add_option_row(packet->options, row);
-			/* iets van een wrapper functie make die controleert
-			 * of het volgende regeltje de zelfde option bevat
-			 * als deze optie een list mag zijn, dan appenden
-			 * geen list, dan vervangen
-			 * nieuwe optie, dan toevoegen*/
-			return_value = 1;
+		return_value = -1;
+	} else {
+		res = mysql_store_result(conn);
+		if (!res) {
+			mysql_close(conn);
+			return -1;
 		}
-
+		while ((row = mysql_fetch_row(res)) != NULL) {
+			if (row[0] && row[1] && strcmp(row[0], "51") == 0) {
+				char *end;
+				unsigned long value;
+				errno = 0;
+				value = strtoul(row[1], &end, 10);
+				if (errno || end == row[1] || *end || row[1][0] == '-' ||
+				    !value || value > UINT32_MAX) {
+					return_value = -1;
+					break;
+				}
+				*lease_time = value;
+				continue;
+			}
+			if (add_option_row(packet->options, row)) return_value = 1;
+		}
+		if (mysql_errno(conn)) return_value = -1;
 		mysql_free_result(res);
-
 	}
-	
+
 	mysql_close(conn);
 
 	return return_value;
@@ -170,6 +192,7 @@ int sendOffer(struct dhcpMessage *oldpacket)
 	uint32_t req_align, lease_time_align = server_config.lease;
 	uint8_t *req, *lease_time;
 	struct option_set *curr;
+	int mysql_options;
 	struct in_addr addr;
 
 	uint32_t static_lease_ip;
@@ -177,6 +200,7 @@ int sendOffer(struct dhcpMessage *oldpacket)
 	init_packet(&packet, oldpacket, DHCPOFFER);
 
 	static_lease_ip = getIpByMac(server_config.static_leases, oldpacket->chaddr);
+	if (static_lease_ip == STATIC_LEASE_ERROR) return -1;
 
 	/* ADDME: if static, short circuit */
 	if(!static_lease_ip)
@@ -197,7 +221,7 @@ int sendOffer(struct dhcpMessage *oldpacket)
 		   ntohl(req_align) >= ntohl(server_config.start) &&
 		   ntohl(req_align) <= ntohl(server_config.end) &&
 		
-			!static_lease_ip &&  /* Check that its not a static lease */
+			!reservedIp(server_config.static_leases, req_align) &&
 			/* and is not already taken/offered */
 		   ((!(lease = find_lease_by_yiaddr(req_align)) ||
 		
@@ -245,7 +269,9 @@ int sendOffer(struct dhcpMessage *oldpacket)
 
 	add_simple_option(packet.options, DHCP_LEASE_TIME, htonl(lease_time_align));
 	
-	if (!add_mysql_options(&packet, oldpacket->chaddr)) {
+	mysql_options = add_mysql_options(&packet, oldpacket->chaddr, &lease_time_align);
+	if (mysql_options < 0) return -1;
+	if (!mysql_options) {
 	
 		curr = server_config.options;
 		while (curr) {
@@ -256,6 +282,17 @@ int sendOffer(struct dhcpMessage *oldpacket)
 
 		add_bootp_options(&packet);
 	}
+
+	/* Use exactly the same duration on the wire and in the lease table. */
+	if ((lease_time = get_option(oldpacket, DHCP_LEASE_TIME))) {
+		uint32_t requested;
+		memcpy(&requested, lease_time, sizeof(requested));
+		requested = ntohl(requested);
+		if (requested >= server_config.min_lease && requested < lease_time_align)
+			lease_time_align = requested;
+	}
+	uint32_t wire_lease = htonl(lease_time_align);
+	memcpy(get_option(&packet, DHCP_LEASE_TIME), &wire_lease, sizeof(wire_lease));
 
 	addr.s_addr = packet.yiaddr;
 	LOG(LOG_INFO, "sending OFFER of %s", inet_ntoa(addr));
@@ -278,6 +315,7 @@ int sendACK(struct dhcpMessage *oldpacket, uint32_t yiaddr)
 {
 	struct dhcpMessage packet;
 	struct option_set *curr;
+	int mysql_options;
 	uint8_t *lease_time;
 	uint32_t lease_time_align = server_config.lease;
 	struct in_addr addr;
@@ -295,8 +333,10 @@ int sendACK(struct dhcpMessage *oldpacket, uint32_t yiaddr)
 	}
 
 
-	if (!add_mysql_options(&packet, oldpacket->chaddr)) {
-		add_simple_option(packet.options, DHCP_LEASE_TIME, htonl(lease_time_align));
+	add_simple_option(packet.options, DHCP_LEASE_TIME, htonl(lease_time_align));
+	mysql_options = add_mysql_options(&packet, oldpacket->chaddr, &lease_time_align);
+	if (mysql_options < 0) return -1;
+	if (!mysql_options) {
 
 		curr = server_config.options;
 		while (curr) {
@@ -307,6 +347,17 @@ int sendACK(struct dhcpMessage *oldpacket, uint32_t yiaddr)
 
 		add_bootp_options(&packet);
 	}
+
+	/* Use exactly the same duration on the wire and in the lease table. */
+	if ((lease_time = get_option(oldpacket, DHCP_LEASE_TIME))) {
+		uint32_t requested;
+		memcpy(&requested, lease_time, sizeof(requested));
+		requested = ntohl(requested);
+		if (requested >= server_config.min_lease && requested < lease_time_align)
+			lease_time_align = requested;
+	}
+	uint32_t wire_lease = htonl(lease_time_align);
+	memcpy(get_option(&packet, DHCP_LEASE_TIME), &wire_lease, sizeof(wire_lease));
 
 	addr.s_addr = packet.yiaddr;
 	LOG(LOG_INFO, "sending ACK to %s", inet_ntoa(addr));

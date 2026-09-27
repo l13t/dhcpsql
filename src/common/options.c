@@ -5,6 +5,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
 
 #include "udhcp/dhcpd.h"
 #include "udhcp/files.h"
@@ -67,53 +70,45 @@ int option_lengths[] = {
 /* get an option with bounds checking (warning, not aligned). */
 uint8_t *get_option(struct dhcpMessage *packet, int code)
 {
-	int i, length;
-	uint8_t *optionptr;
-	int over = 0, done = 0, curr = OPTION_FIELD;
+	int i = 0, length = sizeof(packet->options);
+	uint8_t *optionptr = packet->options;
+	int over = 0, curr = OPTION_FIELD;
 
-	optionptr = packet->options;
-	i = 0;
-	length = 308;
-	while (!done) {
-		if (i >= length) {
-			LOG(LOG_WARNING, "bogus packet, option fields too long.");
-			return NULL;
+	while (i < length) {
+		int opt = optionptr[i];
+		int len, j;
+		if (opt == DHCP_PADDING) { i++; continue; }
+		if (opt == DHCP_END) {
+			if (curr == OPTION_FIELD && (over & FILE_FIELD)) {
+				optionptr = packet->file; length = sizeof(packet->file);
+				curr = FILE_FIELD;
+			} else if (curr != SNAME_FIELD && (over & SNAME_FIELD)) {
+				optionptr = packet->sname; length = sizeof(packet->sname);
+				curr = SNAME_FIELD;
+			} else break;
+			i = 0;
+			continue;
 		}
-		if (optionptr[i + OPT_CODE] == code) {
-			if (i + 1 + optionptr[i + OPT_LEN] >= length) {
-				LOG(LOG_WARNING, "bogus packet, option fields too long.");
-				return NULL;
+		if (length - i < 2) return NULL;
+		len = optionptr[i + OPT_LEN];
+		if (!len || len > length - i - 2) return NULL;
+		if (opt == DHCP_OPTION_OVER) {
+			if (len != 1) return NULL;
+			if (curr == OPTION_FIELD) over = optionptr[i + 2];
+		}
+		if (opt == code) {
+			/* Callers copy fixed-size values without another length check. */
+			for (j = 0; dhcp_options[j].code; j++) {
+				int type = dhcp_options[j].flags & TYPE_MASK;
+				int size = option_lengths[type];
+				if (dhcp_options[j].code == code && type != OPTION_STRING &&
+				    (len < size || len % size ||
+				     (!(dhcp_options[j].flags & OPTION_LIST) && len != size)))
+					return NULL;
 			}
 			return optionptr + i + 2;
 		}
-		switch (optionptr[i + OPT_CODE]) {
-		case DHCP_PADDING:
-			i++;
-			break;
-		case DHCP_OPTION_OVER:
-			if (i + 1 + optionptr[i + OPT_LEN] >= length) {
-				LOG(LOG_WARNING, "bogus packet, option fields too long.");
-				return NULL;
-			}
-			over = optionptr[i + 3];
-			i += optionptr[OPT_LEN] + 2;
-			break;
-		case DHCP_END:
-			if (curr == OPTION_FIELD && over & FILE_FIELD) {
-				optionptr = packet->file;
-				i = 0;
-				length = 128;
-				curr = FILE_FIELD;
-			} else if (curr == FILE_FIELD && over & SNAME_FIELD) {
-				optionptr = packet->sname;
-				i = 0;
-				length = 64;
-				curr = SNAME_FIELD;
-			} else done = 1;
-			break;
-		default:
-			i += optionptr[OPT_LEN + i] + 2;
-		}
+		i += len + 2;
 	}
 	return NULL;
 }
@@ -153,95 +148,82 @@ int add_option_string(uint8_t *optionptr, uint8_t *string)
 int add_option_row(uint8_t *optionptr, MYSQL_ROW row)
 {
 	char *endptr;
-	char buffer[8];
-	uint16_t *result_u16 = (uint16_t *) buffer;
-	uint32_t *result_u32 = (uint32_t *) buffer;
-	uint8_t code = 0;
-	uint8_t flags = 0;
-	int i;
-	int n;
-	char *ip;
-	int length = 0;
-	int end = end_option(optionptr);
-	char option[255];
+	uint8_t option[257] = {0};
+	unsigned long value;
+	long signed_value;
+	uint16_t u16;
+	uint32_t u32;
+	int i, flags = 0, length = 0, type;
 	struct in_addr addr;
 
-	code = atoi(row[0]);
-	//sscanf(row[0], "%u", (unsigned int *)&code);
-
-	for (i = 0; dhcp_options[i].code; i++)
-		if (dhcp_options[i].code == code) {
+	if (!row || !row[0] || !row[1]) return 0;
+	errno = 0;
+	value = strtoul(row[0], &endptr, 10);
+	if (errno || endptr == row[0] || *endptr || !value || value >= DHCP_END) return 0;
+	for (i = 0; dhcp_options[i].code; i++) {
+		if (dhcp_options[i].code == value) {
 			flags = dhcp_options[i].flags;
-			length = option_lengths[dhcp_options[i].flags & TYPE_MASK];
+			length = option_lengths[flags & TYPE_MASK];
+			break;
 		}
-
-	option[OPT_CODE] = code;
-
-	/* This is what SHOULD BE CHECKED! */
-
-	switch (flags & TYPE_MASK) {
-		case OPTION_IP_PAIR:
-		case OPTION_IP:
-			if (flags & OPTION_LIST) {
-				n = 0;
-				if ((ip = strtok(row[1], " "))!=NULL) {
-					do {
-						if ((2 + ((n+1) * length)) < 255) {
-							inet_aton(ip, &addr);
-							memcpy(option + 2 + (n * length), &addr.s_addr, length);
-							n++;
-						}
-					} while ((ip = strtok(NULL, " ")) != NULL);
-				}
-				length *= n;
-			} else {
-				inet_aton(row[1], &addr);
-				memcpy(option + 2, &addr.s_addr, length);
+	}
+	if (!length) return 0;
+	option[OPT_CODE] = value;
+	type = flags & TYPE_MASK;
+	if (type == OPTION_IP) {
+		if (flags & OPTION_LIST) {
+			char copy[256], *save, *ip;
+			if (strlen(row[1]) >= sizeof(copy)) return 0;
+			strcpy(copy, row[1]);
+			length = 0;
+			for (ip = strtok_r(copy, " ", &save); ip; ip = strtok_r(NULL, " ", &save)) {
+				if (length + 4 > 255 || !inet_aton(ip, &addr)) return 0;
+				memcpy(option + 2 + length, &addr.s_addr, 4);
+				length += 4;
 			}
-			break;
+			if (!length) return 0;
+		} else {
+			if (!inet_aton(row[1], &addr)) return 0;
+			memcpy(option + 2, &addr.s_addr, 4);
+		}
+	} else if (type == OPTION_STRING) {
+		length = strlen(row[1]);
+		if (!length || length > 255) return 0;
+		memcpy(option + 2, row[1], length);
+	} else {
+		errno = 0;
+		if (type == OPTION_S16 || type == OPTION_S32) {
+			signed_value = strtol(row[1], &endptr, 0);
+			if (errno || endptr == row[1] || *endptr ||
+			    signed_value < (type == OPTION_S16 ? INT16_MIN : INT32_MIN) ||
+			    signed_value > (type == OPTION_S16 ? INT16_MAX : INT32_MAX)) return 0;
+			value = signed_value;
+		} else {
+			value = strtoul(row[1], &endptr, 0);
+			if (errno || endptr == row[1] || *endptr || row[1][0] == '-' ||
+			    value > (length == 1 ? UINT8_MAX : length == 2 ? UINT16_MAX : UINT32_MAX)) return 0;
+		}
+		switch (type) {
 		case OPTION_BOOLEAN:
-			if (strcmp(row[1], '1')) 
-				option[3] = 1;
-			else
-				option[3] = 0;
-			break;
-		case OPTION_STRING:
-			length = strlen(row[1]);
-			if (length >= 252) length=252;
-			memcpy(option + 2, row[1], length);
-			break;
+			if (value > 1) return 0;
+			/* fall through */
 		case OPTION_U8:
-			buffer[0] = strtoul(row[1], &endptr, 0);
-     			if (endptr[0] == '\0')
-				memcpy(option + 2, buffer[0], length);
+			option[2] = value;
 			break;
 		case OPTION_U16:
-			*result_u16 = htons(strtoul(row[1], &endptr, 0));
-			if (endptr[0] == '\0')
-				memcpy(option + 2, result_u16, length);
-			break;
 		case OPTION_S16:
-			*result_u16 = htons(strtol(row[1], &endptr, 0));
-			if (endptr[0] == '\0')
-				memcpy(option + 2, result_u16, length);
+			u16 = htons(value);
+			memcpy(option + 2, &u16, sizeof(u16));
 			break;
 		case OPTION_U32:
-			*result_u32 = htonl(strtoul(row[1], &endptr, 0));
-			if (endptr[0] == '\0')
-       				memcpy(option + 2, result_u32, length);
-			break;
 		case OPTION_S32:
-			*result_u32 = htonl(strtol(row[1], &endptr, 0));
-			if (endptr[0] == '\0')
-				memcpy(option + 2, result_u32, length);
+			u32 = htonl(value);
+			memcpy(option + 2, &u32, sizeof(u32));
 			break;
-		default:
-			break;
+		default: return 0;
+		}
 	}
-
-	/* String function changes stuff... */
 	option[OPT_LEN] = length;
-
 	return add_option_string(optionptr, option);
 }
 #endif
