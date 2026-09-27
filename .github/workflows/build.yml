@@ -1,0 +1,97 @@
+name: Build and release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: MySQL ${{ matrix.mysql }}, combined ${{ matrix.combined }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ['ON', 'OFF']
+        combined: ['ON', 'OFF']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libmysqlclient-dev valgrind
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTS=ON
+          -DENABLE_DEBUG=OFF
+          -DENABLE_MYSQL=${{ matrix.mysql }}
+          -DCOMBINED_BINARY=${{ matrix.combined }}
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 60
+      - name: Package
+        if: matrix.mysql == 'ON' && matrix.combined == 'ON'
+        env:
+          BUILD_REF: ${{ github.ref_name }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          package=dhcpsql-linux-x86_64
+          cmake --install build --prefix "$PWD/stage/$package"
+          cp README.md "stage/$package/"
+          printf 'Ref: %s\nCommit: %s\nPlatform: Ubuntu 24.04 x86_64\nRuntime: libc6, libmysqlclient21\n' \
+            "$BUILD_REF" "$BUILD_SHA" > "stage/$package/BUILD-INFO.txt"
+          mkdir -p dist
+          tar -czf "dist/$package.tar.gz" -C stage "$package"
+          cd dist
+          sha256sum "$package.tar.gz" > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: matrix.mysql == 'ON' && matrix.combined == 'ON'
+        with:
+          name: dhcpsql-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Validate release tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Release tags must use vMAJOR.MINOR.PATCH (for example v0.9.10).'
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: dhcpsql-linux-x86_64
+          path: dist
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$TAG"
+          dist/dhcpsql-linux-x86_64.tar.gz dist/SHA256SUMS
+          --verify-tag --generate-notes --title "dhcpsql $TAG"
