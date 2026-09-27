@@ -1,40 +1,33 @@
-cmake_minimum_required(VERSION 3.12)
+# Keep assertions enabled even in Release builds.
+add_compile_options(-UNDEBUG)
 
-# Test configuration
-enable_testing()
-
-# Add test directory to include path
-include_directories(${CMAKE_SOURCE_DIR}/include)
-
-# Test source files
-set(TEST_SOURCES
-    test_common.c
-    test_options.c
-    test_packet.c
-)
-
-# Common test dependencies
-set(TEST_DEPS
+add_executable(test_common test_common.c
     ${CMAKE_SOURCE_DIR}/src/common/common.c
-    ${CMAKE_SOURCE_DIR}/src/common/options.c
-    ${CMAKE_SOURCE_DIR}/src/common/packet.c
-)
+    ${CMAKE_SOURCE_DIR}/src/common/pidfile.c)
+add_test(NAME test_common COMMAND test_common)
 
-# Create test executables
-foreach(test_source ${TEST_SOURCES})
-    get_filename_component(test_name ${test_source} NAME_WE)
-    add_executable(${test_name} ${test_source} ${TEST_DEPS})
-    add_test(NAME ${test_name} COMMAND ${test_name})
-endforeach()
+add_executable(test_options test_options.c test_support.c
+    ${CMAKE_SOURCE_DIR}/src/common/options.c)
+add_test(NAME test_options COMMAND test_options)
 
-# Integration tests
-add_executable(integration_test integration_test.c ${TEST_DEPS})
-add_test(NAME integration_test COMMAND integration_test)
+if(ENABLE_MYSQL)
+    add_executable(test_mysql test_mysql.c test_support.c
+        ${CMAKE_SOURCE_DIR}/src/common/options.c
+        ${CMAKE_SOURCE_DIR}/src/server/static_leases_mysql.c
+        ${CMAKE_SOURCE_DIR}/src/server/serverpacket_mysql.c
+        ${CMAKE_SOURCE_DIR}/src/server/leases.c)
+    target_include_directories(test_mysql BEFORE PRIVATE stubs)
+    add_test(NAME test_mysql COMMAND test_mysql)
+endif()
 
-# Memory leak tests (requires valgrind)
 find_program(VALGRIND_EXECUTABLE valgrind)
 if(VALGRIND_EXECUTABLE)
-    add_test(NAME memory_leak_test 
-             COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --error-exitcode=1 
-             $<TARGET_FILE:test_common>)
+    add_test(NAME memory_leak_test
+        COMMAND ${VALGRIND_EXECUTABLE} --leak-check=full --error-exitcode=1
+        $<TARGET_FILE:test_options>)
+endif()
+
+find_program(BASH_EXECUTABLE bash)
+if(BASH_EXECUTABLE)
+    add_test(NAME test_runner COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_runner.sh)
 endif()

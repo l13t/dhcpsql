@@ -1,0 +1,212 @@
+services:
+  # MySQL Database for DHCP server
+  mysql-test:
+    image: mysql:8.0
+    container_name: dhcp-mysql-test
+    environment:
+      MYSQL_ROOT_PASSWORD: testroot
+      MYSQL_DATABASE: dhcp_test
+      MYSQL_USER: dhcp_test
+      MYSQL_PASSWORD: dhcp_test
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_test_data:/var/lib/mysql
+      - ./config/dhcp.sql:/docker-entrypoint-initdb.d/01-dhcp-schema.sql:ro
+      - ./config/sample-data.sql:/docker-entrypoint-initdb.d/02-sample-data.sql:ro
+      - ./tests/integration/test-data.sql:/docker-entrypoint-initdb.d/03-test-data.sql:ro
+    networks:
+      - dhcp-test-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "dhcp_test",
+          "-pdhcp_test",
+        ]
+      timeout: 20s
+      retries: 10
+      interval: 5s
+      start_period: 30s
+
+  # DHCP Server for testing
+  dhcp-server-test:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+    container_name: dhcp-server-test
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+    volumes:
+      - ./tests/integration/configs/udhcpd-test.conf:/etc/udhcpd.conf:ro
+      - ./config:/app/config:ro
+      - ./tests/integration:/app/tests:ro
+      - dhcp_test_leases:/var/lib/dhcp
+      - test_results:/app/tests/results
+      - ./logs:/var/log/dhcp
+    networks:
+      dhcp-test-network:
+        ipv4_address: 172.20.0.10
+    environment:
+      - MYSQL_HOST=mysql-test
+      - MYSQL_USER=dhcp_test
+      - MYSQL_PASSWORD=dhcp_test
+      - MYSQL_DATABASE=dhcp_test
+      - TEST_MODE=1
+    command: ["/app/tests/run-server-tests.sh"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    privileged: true
+
+  # DHCP Client simulator for testing
+  dhcp-client-test:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+    container_name: dhcp-client-test
+    depends_on:
+      - dhcp-server-test
+    volumes:
+      - ./tests/integration:/app/tests:ro
+      - ./config:/app/config:ro
+      - test_results:/app/tests/results
+    networks:
+      dhcp-test-network:
+        ipv4_address: 172.20.0.11
+    environment:
+      - TEST_MODE=1
+      - DHCP_SERVER_IP=172.20.0.10
+    command: ["/app/tests/run-client-tests.sh"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+  # Integration test runner
+  integration-tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+    container_name: dhcp-integration-tests
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+      dhcp-server-test:
+        condition: service_started
+    volumes:
+      - ./tests/integration:/app/tests:ro
+      - ./config:/app/config:ro
+      - test_results:/app/tests/results
+      - test_results:/app/tests/results
+      - ./logs:/var/log/dhcp
+    networks:
+      - dhcp-test-network
+    environment:
+      - MYSQL_HOST=mysql-test
+      - MYSQL_USER=dhcp_test
+      - MYSQL_PASSWORD=dhcp_test
+      - MYSQL_DATABASE=dhcp_test
+      - DHCP_SERVER_IP=172.20.0.10
+      - TEST_MODE=1
+    command: ["/app/tests/run-integration-tests.sh"]
+
+  # Database test runner
+  database-tests:
+    image: mysql:8.0
+    container_name: dhcp-database-tests
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+    volumes:
+      - ./tests/integration:/app/tests:ro
+      - ./config:/app/config:ro
+    networks:
+      - dhcp-test-network
+    environment:
+      - MYSQL_HOST=mysql-test
+      - MYSQL_USER=dhcp_test
+      - MYSQL_PASSWORD=dhcp_test
+      - MYSQL_DATABASE=dhcp_test
+    command: ["/app/tests/run-database-tests.sh"]
+
+  # Load testing container
+  load-tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+    container_name: dhcp-load-tests
+    depends_on:
+      - dhcp-server-test
+    volumes:
+      - ./tests/integration:/app/tests:ro
+      - test_results:/app/tests/results
+      - test_results:/app/tests/results
+      - ./logs:/var/log/dhcp
+    networks:
+      - dhcp-test-network
+    environment:
+      - DHCP_SERVER_IP=172.20.0.10
+      - TEST_MODE=1
+      - LOAD_TEST_CLIENTS=50
+      - LOAD_TEST_DURATION=60
+    command: ["/app/tests/run-load-tests.sh"]
+    profiles:
+      - load-testing
+
+  # Network simulation container for complex scenarios
+  network-simulator:
+    image: nicolaka/netshoot:latest
+    container_name: dhcp-network-simulator
+    depends_on:
+      - dhcp-server-test
+    volumes:
+      - ./tests/integration:/app/tests:ro
+    networks:
+      - dhcp-test-network
+    command: ["/app/tests/run-network-tests.sh"]
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    privileged: true
+    profiles:
+      - network-testing
+
+  # Test results aggregator
+  test-reporter:
+    image: alpine:latest
+    container_name: dhcp-test-reporter
+    depends_on:
+      - integration-tests
+      - database-tests
+    volumes:
+      - ./tests/integration:/app/tests:ro
+      - ./logs:/var/log/dhcp:ro
+      - test_results:/app/tests/results
+    networks:
+      - dhcp-test-network
+    command: ["/app/tests/generate-test-report.sh"]
+    profiles:
+      - reporting
+
+volumes:
+  mysql_test_data:
+    driver: local
+  dhcp_test_leases:
+    driver: local
+  test_results:
+    driver: local
+
+networks:
+  dhcp-test-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1

@@ -273,6 +273,7 @@ int main(int argc, char *argv[])
 
 		/* Look for a static lease */
 		static_lease_ip = getIpByMac(server_config.static_leases, &packet.chaddr);
+		if (static_lease_ip == STATIC_LEASE_ERROR) continue;
 
 		if(static_lease_ip)
 		{

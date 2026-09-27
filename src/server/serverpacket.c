@@ -118,6 +118,7 @@ int sendOffer(struct dhcpMessage *oldpacket) {
 	init_packet(&packet, oldpacket, DHCPOFFER);
 
 	static_lease_ip = getIpByMac(server_config.static_leases, oldpacket->chaddr);
+	if (static_lease_ip == STATIC_LEASE_ERROR) return -1;
 
 	/* ADDME: if static, short circuit */
 	if(!static_lease_ip)
@@ -138,7 +139,7 @@ int sendOffer(struct dhcpMessage *oldpacket) {
 		   ntohl(req_align) >= ntohl(server_config.start) &&
 		   ntohl(req_align) <= ntohl(server_config.end) &&
 		
-			!static_lease_ip &&  /* Check that its not a static lease */
+			!reservedIp(server_config.static_leases, req_align) &&
 			/* and is not already taken/offered */
 		   ((!(lease = find_lease_by_yiaddr(req_align)) ||
 		

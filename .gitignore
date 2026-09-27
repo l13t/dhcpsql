@@ -1,0 +1,3 @@
+# Required source headers must not be hidden by a global Include rule.
+!include/
+!include/**

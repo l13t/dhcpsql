@@ -59,7 +59,6 @@ set(SERVER_SOURCES
     src/server/arpping.c
     src/server/files.c
     src/server/leases.c
-    src/server/static_leases.c
 )
 
 set(CLIENT_SOURCES
@@ -76,7 +75,7 @@ if(ENABLE_MYSQL)
         src/server/static_leases_mysql.c
     )
 else()
-    list(APPEND SERVER_SOURCES src/server/serverpacket.c)
+    list(APPEND SERVER_SOURCES src/server/serverpacket.c src/server/static_leases.c)
 endif()
 
 # Main executable
